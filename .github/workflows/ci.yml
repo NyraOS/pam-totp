@@ -27,6 +27,32 @@ jobs:
       - run: rustup toolchain install 1.85 --profile minimal
       - run: cargo +1.85 test --locked
 
+  # The state and command tests again as root, which is who owns the state files in production (and
+  # lets the test that hands a file to another user run). Root in a container with the default
+  # capabilities and no network is enough, so the tests do not depend on the runner's own user.
+  tests-root:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the tests
+        run: |
+          bin=$(cargo test --locked --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and (.target.kind | index("lib"))) | .executable')
+          mkdir "$RUNNER_TEMP/t"
+          cp "$bin" "$RUNNER_TEMP/t/lib-tests"
+          chmod 755 "$RUNNER_TEMP/t" "$RUNNER_TEMP/t/lib-tests"
+      # debian:trixie-slim, pinned by its multi-arch index digest, from Google's mirror of Docker
+      # Hub (no pull limits per runner IP).
+      - name: Run them as root in a container
+        run: >-
+          docker run --rm --network none -v "$RUNNER_TEMP/t:/t:ro"
+          mirror.gcr.io/library/debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+          /t/lib-tests state:: cli:: --nocapture
+
   deny:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
