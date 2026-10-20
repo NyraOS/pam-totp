@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+[package]
+name = "pam-totp"
+version = "0.1.0"
+edition = "2024"
+# The Rust in Debian 13 (trixie).
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/NyraOS/pam-totp"
+description = "TOTP two-factor for SSH password logins on Nyra OS servers"
