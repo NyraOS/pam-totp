@@ -5,7 +5,8 @@
 //! Ported from GoTOTP (https://github.com/MrTuNNe/GoTOTP, MIT, by the same owner). Changes: SHA1
 //! is the default (authenticator apps ignore the algorithm parameter), the code is compared in
 //! constant time, a window of one step either side is accepted, a step that was already used is
-//! refused, the secret is 160 bits, and no input can make it panic.
+//! refused, the secret is 160 bits, secrets under 128 bits are refused, and no input can make it
+//! panic.
 
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
@@ -18,6 +19,9 @@ pub const PERIOD: u64 = 30;
 pub const DIGITS: usize = 6;
 /// Bytes of a new secret (160 bits, the size RFC 4226 recommends).
 pub const SECRET_LEN: usize = 20;
+/// Fewest bytes a secret may have (128 bits). RFC 4226 section 4 requires at least 128 bits;
+/// shorter secrets are refused rather than checked.
+pub const MIN_SECRET_LEN: usize = 16;
 
 const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -42,7 +46,7 @@ impl Algorithm {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// The secret is empty or not valid base32.
+    /// The secret is shorter than [`MIN_SECRET_LEN`] or not valid base32.
     BadSecret,
     /// The code is not exactly six ASCII digits.
     BadCode,
@@ -59,7 +63,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Error::BadSecret => "the secret is empty or not valid base32",
+            Error::BadSecret => "the secret is too short or not valid base32",
             Error::BadCode => "the code is not exactly six digits",
             Error::WrongCode => "the code is wrong",
             Error::Reused => "the code was already used",
@@ -98,7 +102,8 @@ pub fn encode_secret(secret: &[u8]) -> String {
 }
 
 /// Decodes base32, ignoring case and any trailing `=` padding. Leftover bits of a last partial
-/// character are dropped, as authenticator apps do.
+/// character are dropped, as authenticator apps do. A result shorter than [`MIN_SECRET_LEN`] is
+/// refused.
 pub fn decode_secret(text: &str) -> Result<Vec<u8>, Error> {
     let mut out = Vec::with_capacity(text.len() * 5 / 8);
     let (mut buffer, mut bits) = (0u32, 0);
@@ -116,10 +121,15 @@ pub fn decode_secret(text: &str) -> Result<Vec<u8>, Error> {
             buffer &= (1 << bits) - 1;
         }
     }
-    if out.is_empty() {
+    check_secret(&out)?;
+    Ok(out)
+}
+
+fn check_secret(secret: &[u8]) -> Result<(), Error> {
+    if secret.len() < MIN_SECRET_LEN {
         Err(Error::BadSecret)
     } else {
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -154,8 +164,9 @@ fn mac_bytes<M: Mac + hmac::digest::KeyInit>(key: &[u8], message: &[u8]) -> Vec<
 }
 
 /// The code for the time step that contains `now` (seconds since the Unix epoch).
-pub fn code(secret: &[u8], algorithm: Algorithm, now: u64) -> String {
-    hotp(secret, algorithm, now / PERIOD, DIGITS as u32)
+pub fn code(secret: &[u8], algorithm: Algorithm, now: u64) -> Result<String, Error> {
+    check_secret(secret)?;
+    Ok(hotp(secret, algorithm, now / PERIOD, DIGITS as u32))
 }
 
 /// Checks `input` against the step of `now` and the steps just before and after it, and returns
@@ -168,6 +179,7 @@ pub fn verify(
     now: u64,
     last_used_step: Option<u64>,
 ) -> Result<u64, Error> {
+    check_secret(secret)?;
     if input.len() != DIGITS || !input.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Error::BadCode);
     }
@@ -280,17 +292,17 @@ mod tests {
     fn rfc6238_vectors_six_digits() {
         for (time, sha1, sha256, sha512) in RFC_VECTORS {
             assert_eq!(
-                code(SHA1_SEED, Algorithm::Sha1, time),
+                code(SHA1_SEED, Algorithm::Sha1, time).unwrap(),
                 sha1[2..],
                 "SHA1 {time}"
             );
             assert_eq!(
-                code(SHA256_SEED, Algorithm::Sha256, time),
+                code(SHA256_SEED, Algorithm::Sha256, time).unwrap(),
                 sha256[2..],
                 "SHA256 {time}"
             );
             assert_eq!(
-                code(SHA512_SEED, Algorithm::Sha512, time),
+                code(SHA512_SEED, Algorithm::Sha512, time).unwrap(),
                 sha512[2..],
                 "SHA512 {time}"
             );
@@ -316,9 +328,9 @@ mod tests {
     #[test]
     fn gotp_codes() {
         let secret = go_secret();
-        assert_eq!(code(&secret, Algorithm::Sha256, GO_TIME), "611626");
-        assert_eq!(code(&secret, Algorithm::Sha1, GO_TIME), "032332");
-        assert_eq!(code(&secret, Algorithm::Sha512, GO_TIME), "319711");
+        assert_eq!(code(&secret, Algorithm::Sha256, GO_TIME).unwrap(), "611626");
+        assert_eq!(code(&secret, Algorithm::Sha1, GO_TIME).unwrap(), "032332");
+        assert_eq!(code(&secret, Algorithm::Sha512, GO_TIME).unwrap(), "319711");
     }
 
     #[test]
@@ -343,7 +355,7 @@ mod tests {
     fn algorithms_give_distinct_codes() {
         let secret = go_secret();
         let codes = [Algorithm::Sha1, Algorithm::Sha256, Algorithm::Sha512]
-            .map(|alg| code(&secret, alg, GO_TIME));
+            .map(|alg| code(&secret, alg, GO_TIME).unwrap());
         assert!(codes[0] != codes[1] && codes[1] != codes[2] && codes[0] != codes[2]);
     }
 
@@ -355,7 +367,35 @@ mod tests {
         let text = encode_secret(&secret);
         assert_eq!(text.len(), 32);
         assert_eq!(decode_secret(&text).unwrap(), secret);
-        assert_eq!(code(&secret, Algorithm::Sha1, GO_TIME).len(), 6);
+        assert_eq!(code(&secret, Algorithm::Sha1, GO_TIME).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn short_secrets_are_refused() {
+        let short = [0x42u8; MIN_SECRET_LEN - 1];
+        assert_eq!(code(&[], Algorithm::Sha1, GO_TIME), Err(Error::BadSecret));
+        assert_eq!(
+            code(&short, Algorithm::Sha1, GO_TIME),
+            Err(Error::BadSecret)
+        );
+        assert_eq!(
+            verify(&[], Algorithm::Sha1, "000000", GO_TIME, None),
+            Err(Error::BadSecret)
+        );
+        assert_eq!(
+            verify(&short, Algorithm::Sha1, "000000", GO_TIME, None),
+            Err(Error::BadSecret)
+        );
+    }
+
+    #[test]
+    fn minimum_length_secret_is_accepted() {
+        let secret = [0x42u8; MIN_SECRET_LEN];
+        let input = code(&secret, Algorithm::Sha1, GO_TIME).unwrap();
+        assert_eq!(
+            verify(&secret, Algorithm::Sha1, &input, GO_TIME, None),
+            Ok(GO_TIME / PERIOD)
+        );
     }
 
     #[test]
@@ -363,7 +403,7 @@ mod tests {
         let secret = SHA1_SEED;
         let now = 1_000_000_000u64;
         let step = now / PERIOD;
-        let at = |s: u64| code(secret, Algorithm::Sha1, s * PERIOD);
+        let at = |s: u64| code(secret, Algorithm::Sha1, s * PERIOD).unwrap();
         let check = |s: u64| verify(secret, Algorithm::Sha1, &at(s), now, None);
         assert_eq!(check(step), Ok(step));
         assert_eq!(check(step - 1), Ok(step - 1));
@@ -376,7 +416,7 @@ mod tests {
     fn verify_window_at_time_zero_and_max() {
         let secret = SHA1_SEED;
         for now in [0, 29, u64::MAX] {
-            let wanted = code(secret, Algorithm::Sha1, now);
+            let wanted = code(secret, Algorithm::Sha1, now).unwrap();
             assert_eq!(
                 verify(secret, Algorithm::Sha1, &wanted, now, None),
                 Ok(now / PERIOD)
@@ -389,7 +429,7 @@ mod tests {
         let secret = SHA1_SEED;
         let now = 1_000_000_000u64;
         let step = now / PERIOD;
-        let input = code(secret, Algorithm::Sha1, now);
+        let input = code(secret, Algorithm::Sha1, now).unwrap();
         let used = verify(secret, Algorithm::Sha1, &input, now, None).unwrap();
         assert_eq!(
             verify(secret, Algorithm::Sha1, &input, now, Some(used)),
@@ -401,13 +441,13 @@ mod tests {
             Err(Error::Reused)
         );
         // An older step than the last used one is refused too.
-        let older = code(secret, Algorithm::Sha1, now - PERIOD);
+        let older = code(secret, Algorithm::Sha1, now - PERIOD).unwrap();
         assert_eq!(
             verify(secret, Algorithm::Sha1, &older, now, Some(step)),
             Err(Error::Reused)
         );
         // A newer step is accepted.
-        let newer = code(secret, Algorithm::Sha1, now + PERIOD);
+        let newer = code(secret, Algorithm::Sha1, now + PERIOD).unwrap();
         assert_eq!(
             verify(secret, Algorithm::Sha1, &newer, now, Some(step)),
             Ok(step + 1)
@@ -417,7 +457,7 @@ mod tests {
     #[test]
     fn verify_refuses_malformed_codes() {
         let secret = SHA1_SEED;
-        let good = code(secret, Algorithm::Sha1, 59);
+        let good = code(secret, Algorithm::Sha1, 59).unwrap();
         let bad = [
             "",
             "1",
@@ -451,7 +491,10 @@ mod tests {
     #[test]
     fn code_keeps_leading_zeros() {
         // The RFC 4226 vector at time 1111111109 starts with a zero.
-        assert_eq!(code(SHA1_SEED, Algorithm::Sha1, 1111111109), "081804");
+        assert_eq!(
+            code(SHA1_SEED, Algorithm::Sha1, 1111111109).unwrap(),
+            "081804"
+        );
     }
 
     #[test]
@@ -468,42 +511,46 @@ mod tests {
         ];
         for (plain, encoded) in cases {
             assert_eq!(encode_secret(plain.as_bytes()), encoded);
-            if !plain.is_empty() {
-                assert_eq!(decode_secret(encoded).unwrap(), plain.as_bytes());
-            }
         }
     }
 
     #[test]
+    fn decode_refuses_short_secrets() {
+        assert_eq!(decode_secret(""), Err(Error::BadSecret));
+        assert_eq!(decode_secret("===="), Err(Error::BadSecret));
+        assert_eq!(
+            decode_secret(&encode_secret(&[0x42; 15])),
+            Err(Error::BadSecret)
+        );
+        assert_eq!(
+            decode_secret(&encode_secret(&[0x42; 16])).unwrap(),
+            [0x42; 16]
+        );
+    }
+
+    #[test]
     fn base32_decoding_is_tolerant_of_case_and_padding() {
-        assert_eq!(decode_secret("mzxw6ytboi").unwrap(), b"foobar");
-        assert_eq!(decode_secret("MZXW6YTBOI======").unwrap(), b"foobar");
-        assert_eq!(decode_secret("MzXw6===").unwrap(), b"foo");
-        assert_eq!(decode_secret("MY======").unwrap(), b"f");
+        let secret = go_secret();
+        assert_eq!(decode_secret(&GO_KEY.to_lowercase()).unwrap(), secret);
+        assert_eq!(decode_secret(&format!("{GO_KEY}====")).unwrap(), secret);
+        assert_eq!(
+            decode_secret(&format!("{}==", GO_KEY.to_lowercase())).unwrap(),
+            secret
+        );
     }
 
     #[test]
     fn base32_decoding_refuses_bad_input() {
-        for text in [
-            "",
-            "====",
-            "MZ=XQ",
-            "MZXW 6YTB",
-            "MZXW6YT1",
-            "MZXW6YT8",
-            "MZXW6YTB\n",
-            "é",
-            "M\0",
-        ] {
-            assert_eq!(decode_secret(text), Err(Error::BadSecret), "{text:?}");
+        for suffix in ["1", "8", " ", "\n", "\0", "é", "=A"] {
+            let text = format!("{GO_KEY}{suffix}");
+            assert_eq!(decode_secret(&text), Err(Error::BadSecret), "{text:?}");
         }
     }
 
     #[test]
     fn base32_round_trips() {
-        let mut data = Vec::new();
-        for len in 1..=64usize {
-            data.push((len * 37 % 256) as u8);
+        for len in MIN_SECRET_LEN..=64usize {
+            let data: Vec<u8> = (0..len).map(|i| (i * 37 % 256) as u8).collect();
             let text = encode_secret(&data);
             assert!(!text.contains('='));
             assert_eq!(decode_secret(&text).unwrap(), data);

@@ -11,7 +11,7 @@ and the `2fa` command are not written yet.
 ## Credit
 
 The TOTP core is ported from [MrTuNNe/GoTOTP](https://github.com/MrTuNNe/GoTOTP) (MIT), by the same owner. Changes from it: SHA1 is the default,
-constant-time comparison, a ±1 step window, refusal of a reused step, a 160-bit secret, no panics.
+constant-time comparison, a ±1 step window, refusal of a reused step, a 160-bit secret, secrets under 128 bits refused, no panics.
 
 ## Development
 
