@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         is_root: rustix::process::geteuid().is_root(),
         caller_uid: rustix::process::getuid().as_raw(),
         sudo_user: std::env::var("SUDO_USER").ok(),
-        passwd: std::path::Path::new("/etc/passwd"),
+        passwd: std::path::Path::new(pam_totp::passwd::PASSWD),
         hostname: rustix::system::uname()
             .nodename()
             .to_string_lossy()

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! The `2fa` command: `enable`, `status`, `disable` and `recovery` for one user.
 
+use crate::passwd;
 use crate::state::{self, State, Store};
 use crate::totp::{self, Algorithm};
 use qrcode::QrCode;
@@ -100,14 +101,9 @@ pub fn run(command: Command, env: &mut Env) -> Result<(), Box<dyn Error>> {
 fn resolve(command: &Command, env: &Env) -> Result<Target, Box<dyn Error>> {
     let users = std::fs::read_to_string(env.passwd)
         .map_err(|e| format!("cannot read the user list: {e}"))?;
-    let entries = users.lines().filter_map(|line| {
-        let mut fields = line.split(':');
-        let name = fields.next()?;
-        let uid = fields.nth(1)?.parse::<u32>().ok()?;
-        Some(Target {
-            name: name.to_string(),
-            uid,
-        })
+    let entries = passwd::entries(&users).map(|(name, uid)| Target {
+        name: name.to_string(),
+        uid,
     });
     let by_name = command.user.as_deref().or(if env.is_root {
         env.sudo_user.as_deref()

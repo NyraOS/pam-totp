@@ -6,7 +6,8 @@ TOTP two-factor authentication for SSH password logins on Nyra OS servers: a PAM
 **Status: early development.** Done: the TOTP library (`src/totp.rs`): RFC 6238 codes (SHA1 by
 default, SHA256 and SHA512 supported; 6 digits, 30 s), base32 secrets, verification of the current
 step and one either side with no reuse of a step, and the `otpauth://` URI; the per-user state file
-(`src/state.rs`); and the `2fa` command (`nyra-2fa`). The PAM module is not written yet.
+(`src/state.rs`); the `2fa` command (`nyra-2fa`); and the PAM module (`pam/`, decision logic in
+`src/auth.rs`).
 
 ## The `2fa` command
 
@@ -23,6 +24,32 @@ changed under a per-user lock, and replaced atomically. The format is text, one 
 line: `version=1`, `algorithm`, `secret` (base32), `last_step` and one `recovery` line (SHA-256 of
 the code) per unused recovery code.
 
+## The PAM module
+
+`cargo build --release -p pam_nyra_totp` builds `target/release/libpam_nyra_totp.so`, which is
+installed as `pam_nyra_totp.so` in the PAM module directory (`/usr/lib/x86_64-linux-gnu/security`
+on Debian). It only provides `auth` and takes no options:
+
+```
+auth required pam_unix.so
+auth required pam_nyra_totp.so
+```
+
+On each call it asks `Verification code: ` (echo off) and accepts a 6-digit code from the app or
+an unused recovery code. It answers success only for a right code that was not used before, and
+records its use under the user's lock before answering. Everything else is a refusal: no state
+file for the user (so the password alone never works), an unknown user, an unsafe or broken
+state file, a clock before 1970, an answer over 64 bytes, a failed conversation, a module option,
+or an internal error (panics are caught at the FFI boundary). It asks for the code before looking
+at the user, so the prompt does not tell whether the user exists or has two-step authentication
+on; for the same reason the password module before it must be `required`, not `requisite`. It
+sends no error text to the user and shows nothing on stdout or stderr: the result and its reason
+go to the system log (authpriv), with the user and the remote host but never the code. sshd
+limits the attempts per connection; the module checks one answer per call.
+
+The user's uid is looked up in `/etc/passwd`, as the `2fa` command does. Only Linux-PAM is
+supported. All `unsafe` code is in `pam/src/ffi.rs`; the library has none (`forbid(unsafe_code)`).
+
 ## Credit
 
 The TOTP core is ported from [MrTuNNe/GoTOTP](https://github.com/MrTuNNe/GoTOTP) (MIT), by the same owner. Changes from it: SHA1 is the default,
@@ -37,6 +64,31 @@ cargo test --locked
 ```
 
 The minimum supported Rust is 1.85, the one in Debian 13.
+
+The tests in `tests/pamtester.rs` load the built module into the real libpam through
+`pamtester`. They change `/etc/passwd`, `/etc/pam.d`, `/var/lib/nyra/2fa` and `/dev/log`, so they
+are ignored by default and CI runs them as root in a throwaway Debian 13 container (the
+`pamtester` job):
+
+```
+PAM_NYRA_TOTP=/path/to/libpam_nyra_totp.so <test binary> --ignored --test-threads=1
+```
+
+### Fuzzing
+
+`fuzz/` holds the [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets, in a workspace of
+their own because they need nightly Rust. `code_input` runs any typed answer, at any time and with
+any last used step, through the length bound and the check of the PAM module, and checks that a
+refusal changes nothing and an acceptance is a real code:
+
+```
+cargo install cargo-fuzz
+cd fuzz
+cargo +nightly fuzz run code_input -- -max_total_time=600 -max_len=128
+```
+
+A scheduled CI workflow will run it nightly for 10 minutes on the nightly toolchain, keeping the
+corpus between runs as a cache and uploading any crash as an artifact; it is not set up yet.
 
 ## Security
 

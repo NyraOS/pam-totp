@@ -1,4 +1,11 @@
 # SPDX-License-Identifier: MIT
+# The library and the `2fa` command; the PAM module is the `pam/` member. The fuzz targets in
+# `fuzz/` are a separate workspace, built with nightly Rust.
+[workspace]
+members = ["pam"]
+default-members = [".", "pam"]
+exclude = ["fuzz"]
+
 [package]
 name = "pam-totp"
 version = "0.1.0"
@@ -18,3 +25,8 @@ rustix = { version = "=1.1.5", features = ["fs", "process", "system"] }
 sha1 = "=0.10.6"
 sha2 = "=0.10.9"
 subtle = "=2.6.1"
+
+# The PAM module catches every panic at its exported functions, which needs unwinding: never set
+# `panic = "abort"` here.
+[profile.release]
+panic = "unwind"

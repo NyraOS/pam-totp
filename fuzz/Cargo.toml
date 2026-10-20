@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+# Fuzz targets, run with `cargo +nightly fuzz run <target>` (cargo-fuzz). A workspace of its own,
+# so the main build never needs nightly.
+[package]
+name = "pam-totp-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+pam-totp = { path = ".." }
+sha2 = "=0.10.9"
+
+[[bin]]
+name = "code_input"
+path = "fuzz_targets/code_input.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug-assertions = true
+overflow-checks = true
