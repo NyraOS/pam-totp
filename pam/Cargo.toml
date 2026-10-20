@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# The PAM module: a thin FFI layer over `pam_totp::auth`. Built as libpam_nyra_totp.so and installed
+# as pam_nyra_totp.so in the PAM module directory.
+[package]
+name = "pam_nyra_totp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/NyraOS/pam-totp"
+description = "PAM module that asks for a TOTP code after the password"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+pam-totp = { path = ".." }

@@ -120,6 +120,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pam_nyra_totp"
+version = "0.1.0"
+dependencies = [
+ "pam-totp",
+]
+
+[[package]]
 name = "qrcode"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

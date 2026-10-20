@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - name: Build the tests
         run: |
-          bin=$(cargo test --locked --lib --no-run --message-format=json \
+          bin=$(cargo test --locked -p pam-totp --lib --no-run --message-format=json \
             | jq -r 'select(.reason == "compiler-artifact" and .profile.test and (.target.kind | index("lib"))) | .executable')
           mkdir "$RUNNER_TEMP/t"
           cp "$bin" "$RUNNER_TEMP/t/lib-tests"
@@ -51,7 +51,43 @@ jobs:
         run: >-
           docker run --rm --network none -v "$RUNNER_TEMP/t:/t:ro"
           mirror.gcr.io/library/debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
-          /t/lib-tests state:: cli:: --nocapture
+          /t/lib-tests state:: cli:: auth:: --nocapture
+
+  # The PAM module loaded by the real libpam: pamtester runs logins through a test PAM service as
+  # root in a Debian 13 container with no network (tests/pamtester.rs). The module is the release
+  # build, as installed.
+  pamtester:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the module and the tests
+        run: |
+          cargo build --locked --release -p pam_nyra_totp
+          bin=$(cargo test --locked --test pamtester --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .target.name == "pamtester") | .executable')
+          mkdir "$RUNNER_TEMP/t"
+          cp "$bin" "$RUNNER_TEMP/t/pamtester-tests"
+          cp target/release/libpam_nyra_totp.so "$RUNNER_TEMP/t/pam_nyra_totp.so"
+      # pamtester 0.1.2-4 from Debian 13, pinned by the SHA-256 in Debian's signed package index,
+      # fetched here because the container has no network.
+      - name: Fetch pamtester
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/t/pamtester.deb" \
+            https://deb.debian.org/debian/pool/main/p/pamtester/pamtester_0.1.2-4_amd64.deb
+          echo "4330bfe93a8895856bc7f3d4563ed79060f872b99b3886736611576001502825  $RUNNER_TEMP/t/pamtester.deb" \
+            | sha256sum -c -
+          chmod 755 "$RUNNER_TEMP/t" "$RUNNER_TEMP/t/pamtester-tests" "$RUNNER_TEMP/t/pam_nyra_totp.so"
+      # The same debian:trixie-slim as tests-root.
+      - name: Run them as root in a container
+        run: >-
+          docker run --rm --network none -v "$RUNNER_TEMP/t:/t:ro"
+          -e PAM_NYRA_TOTP=/t/pam_nyra_totp.so
+          mirror.gcr.io/library/debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+          sh -c 'dpkg -i /t/pamtester.deb > /dev/null && /t/pamtester-tests --ignored --test-threads=1'
 
   deny:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
