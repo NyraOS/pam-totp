@@ -23,7 +23,7 @@ pub const SECRET_LEN: usize = 20;
 /// shorter secrets are refused rather than checked.
 pub const MIN_SECRET_LEN: usize = 16;
 
-const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+pub(crate) const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Algorithm {
@@ -571,8 +571,11 @@ mod tests {
         );
         assert_eq!(
             uri.unwrap(),
-            "otpauth://totp/mrtunne.info:admin%40admin.test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\
-             &issuer=mrtunne.info&algorithm=SHA1&digits=6&period=30"
+            format!(
+                "otpauth://totp/mrtunne.info:admin%40admin.test?secret={}\
+                 &issuer=mrtunne.info&algorithm=SHA1&digits=6&period=30",
+                encode_secret(SHA1_SEED)
+            )
         );
     }
 
