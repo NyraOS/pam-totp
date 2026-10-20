@@ -342,3 +342,127 @@ fn one_code_for_one_of_many_concurrent_logins() {
     assert_eq!(accepted, 1);
     assert_eq!(drain_log().len(), 8);
 }
+
+/// A minimal PAM application, for what pamtester cannot do: start a transaction with no user set.
+/// It records every message of the conversation and answers each prompt with `ANSWER`.
+mod app {
+    use std::ffi::{CStr, c_char, c_int, c_void};
+
+    pub const ANSWER: &CStr = c"123456";
+    const PAM_SUCCESS: c_int = 0;
+    const PAM_BUF_ERR: c_int = 5;
+    const PAM_CONV_ERR: c_int = 19;
+
+    #[repr(C)]
+    struct Message {
+        style: c_int,
+        msg: *const c_char,
+    }
+
+    #[repr(C)]
+    struct Response {
+        resp: *mut c_char,
+        retcode: c_int,
+    }
+
+    #[repr(C)]
+    struct Conv {
+        conv: extern "C" fn(c_int, *mut *const Message, *mut *mut Response, *mut c_void) -> c_int,
+        appdata: *mut c_void,
+    }
+
+    #[link(name = "libpam.so.0", kind = "dylib", modifiers = "+verbatim")]
+    unsafe extern "C" {
+        fn pam_start(
+            service: *const c_char,
+            user: *const c_char,
+            conv: *const Conv,
+            pamh: *mut *mut c_void,
+        ) -> c_int;
+        fn pam_authenticate(pamh: *mut c_void, flags: c_int) -> c_int;
+        fn pam_end(pamh: *mut c_void, status: c_int) -> c_int;
+    }
+
+    unsafe extern "C" {
+        fn calloc(count: usize, size: usize) -> *mut c_void;
+        fn strdup(s: *const c_char) -> *mut c_char;
+    }
+
+    /// Records (style, text) of each message in the `Vec` behind `appdata` and answers them all.
+    extern "C" fn conversation(
+        num: c_int,
+        messages: *mut *const Message,
+        responses: *mut *mut Response,
+        appdata: *mut c_void,
+    ) -> c_int {
+        let Ok(num) = usize::try_from(num) else {
+            return PAM_CONV_ERR;
+        };
+        // SAFETY: libpam passes `num` valid messages (Linux-PAM layout: an array of pointers),
+        // a valid out-pointer for the responses, and the `appdata` given to pam_start below,
+        // which points to a live `Vec`. The responses are allocated with the C allocator, as
+        // libpam frees them.
+        unsafe {
+            let seen = &mut *appdata.cast::<Vec<(c_int, String)>>();
+            let out = calloc(num, std::mem::size_of::<Response>()).cast::<Response>();
+            if out.is_null() {
+                return PAM_BUF_ERR;
+            }
+            for i in 0..num {
+                let message = &**messages.add(i);
+                let text = CStr::from_ptr(message.msg).to_string_lossy().into_owned();
+                seen.push((message.style, text));
+                (*out.add(i)).resp = strdup(ANSWER.as_ptr());
+            }
+            *responses = out;
+        }
+        PAM_SUCCESS
+    }
+
+    /// Runs pam_authenticate on `service` with no user set. Returns its status and the
+    /// conversation's messages.
+    pub fn authenticate_without_user(service: &CStr) -> (c_int, Vec<(c_int, String)>) {
+        let mut seen: Vec<(c_int, String)> = Vec::new();
+        let conv = Conv {
+            conv: conversation,
+            appdata: (&raw mut seen).cast(),
+        };
+        let mut pamh = std::ptr::null_mut();
+        // SAFETY: valid C strings and pointers that outlive the transaction, which ends here.
+        let status = unsafe {
+            assert_eq!(
+                pam_start(service.as_ptr(), std::ptr::null(), &conv, &mut pamh),
+                PAM_SUCCESS
+            );
+            let status = pam_authenticate(pamh, 0);
+            pam_end(pamh, status);
+            status
+        };
+        (status, seen)
+    }
+}
+
+#[test]
+#[ignore = "needs root, pamtester and the built module"]
+fn no_user_set_gets_only_the_code_prompt() {
+    setup();
+    drain_log();
+    let service = std::ffi::CString::new(SERVICE).unwrap();
+    let (status, seen) = app::authenticate_without_user(&service);
+    const PAM_AUTH_ERR: i32 = 7;
+    const PAM_PROMPT_ECHO_OFF: i32 = 1;
+    assert_eq!(status, PAM_AUTH_ERR);
+    // Only the module's own prompt, with echo off: no "login:" from libpam, no error text.
+    assert_eq!(
+        seen,
+        vec![(PAM_PROMPT_ECHO_OFF, "Verification code: ".to_string())]
+    );
+    let log = drain_log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(
+        log[0].ends_with(": refused for user (none) from (unknown): no valid user name"),
+        "{log:?}"
+    );
+    let answer = app::ANSWER.to_str().unwrap();
+    assert!(!log[0].contains(answer), "{log:?}");
+}

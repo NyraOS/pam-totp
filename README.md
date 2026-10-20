@@ -35,20 +35,29 @@ auth required pam_unix.so
 auth required pam_nyra_totp.so
 ```
 
-On each call it asks `Verification code: ` (echo off) and accepts a 6-digit code from the app or
-an unused recovery code. It answers success only for a right code that was not used before, and
-records its use under the user's lock before answering. Everything else is a refusal: no state
-file for the user (so the password alone never works), an unknown user, an unsafe or broken
-state file, a clock before 1970, an answer over 64 bytes, a failed conversation, a module option,
-or an internal error (panics are caught at the FFI boundary). It asks for the code before looking
-at the user, so the prompt does not tell whether the user exists or has two-step authentication
-on; for the same reason the password module before it must be `required`, not `requisite`. It
-sends no error text to the user and shows nothing on stdout or stderr: the result and its reason
-go to the system log (authpriv), with the user and the remote host but never the code. sshd
-limits the attempts per connection; the module checks one answer per call.
+On each call it asks `Verification code: ` (echo off) and accepts a 6-digit code from the app or an
+unused recovery code. It answers success only for a right code that was not used before, and
+records its use under the user's lock before answering. Everything else is a refusal: no state file
+for the user (so the password alone never works), an unknown user, an unsafe or broken state file,
+a clock before 1970, an answer over 64 bytes, a failed conversation, a module option, or an
+internal error (panics are caught at the FFI boundary). It asks for the code before looking at the
+user, so the prompt does not tell whether the user exists or has two-step authentication on. The
+user name is the one the application set (sshd always sets it); the module never asks for one. It
+sends no error text to the user and shows nothing on stdout or stderr: the result and its reason go
+to the system log (authpriv), with the user and the remote host but never the code. sshd limits the
+attempts per connection; the module checks one answer per call.
+
+For whoever configures the PAM stack:
+
+- The module goes after `pam_unix` and both are `required`, never `requisite` or `sufficient`.
+  `requisite` would stop at a wrong password before the code prompt, telling an attacker the
+  password was wrong; `sufficient` on either would let one factor alone in.
+- The module does not know whether the password was right. A right code sent with a wrong password
+  is still recorded as used, so that code no longer works and the user waits for the next one.
 
 The user's uid is looked up in `/etc/passwd`, as the `2fa` command does. Only Linux-PAM is
-supported. All `unsafe` code is in `pam/src/ffi.rs`; the library has none (`forbid(unsafe_code)`).
+supported. All `unsafe` code of the module is in `pam/src/ffi.rs`; the library has none
+(`forbid(unsafe_code)`).
 
 ## Credit
 

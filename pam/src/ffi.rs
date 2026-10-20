@@ -27,6 +27,7 @@ pub struct PamHandle {
 // security/_pam_types.h
 pub const PAM_SUCCESS: c_int = 0;
 pub const PAM_AUTH_ERR: c_int = 7;
+const PAM_USER: c_int = 2;
 const PAM_RHOST: c_int = 4;
 const PAM_PROMPT_ECHO_OFF: c_int = 1;
 
@@ -39,13 +40,8 @@ pub const LOG_INFO: c_int = 6;
 // package; its soname has not changed since Linux-PAM 0.75.
 #[link(name = "libpam.so.0", kind = "dylib", modifiers = "+verbatim")]
 unsafe extern "C" {
-    /// `int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt);`
-    /// On success `*user` points to libpam's own copy of the name, valid until it is changed.
-    fn pam_get_user(pamh: *mut PamHandle, user: *mut *const c_char, prompt: *const c_char)
-    -> c_int;
-
     /// `int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item);`
-    /// For `PAM_RHOST` the item is a C string owned by libpam, or NULL.
+    /// For `PAM_USER` and `PAM_RHOST` the item is a C string owned by libpam, or NULL.
     fn pam_get_item(pamh: *const PamHandle, item_type: c_int, item: *mut *const c_void) -> c_int;
 
     /// `int pam_prompt(pam_handle_t *pamh, int style, char **response, const char *fmt, ...);`
@@ -72,30 +68,28 @@ unsafe extern "C" {
 pub struct Handle(*mut PamHandle);
 
 impl Handle {
-    /// The user name, if libpam has one that is valid UTF-8 and at most `max` bytes.
+    /// The user name the application set, if it is valid UTF-8 and at most `max` bytes. Read as
+    /// an item, never with `pam_get_user`, which would prompt for a name when none is set.
     pub fn user(&self, max: usize) -> Option<String> {
-        let mut user: *const c_char = std::ptr::null();
-        // SAFETY: `self.0` is the live handle of this call. A NULL prompt asks libpam for its
-        // default; sshd always sets the user at pam_start, so no prompt happens there.
-        let status = unsafe { pam_get_user(self.0, &mut user, std::ptr::null()) };
-        if status != PAM_SUCCESS {
-            return None;
-        }
-        // SAFETY: on success `user` is NULL or a C string owned by libpam, unchanged during
-        // this call.
-        unsafe { copy_bounded(user, max) }
+        self.string_item(PAM_USER, max)
     }
 
     /// The remote host as sshd set it, if it is valid UTF-8 and at most `max` bytes.
     pub fn rhost(&self, max: usize) -> Option<String> {
+        self.string_item(PAM_RHOST, max)
+    }
+
+    /// A string item (`PAM_USER` or `PAM_RHOST`) if it is set, valid UTF-8 and at most `max`
+    /// bytes.
+    fn string_item(&self, item_type: c_int, max: usize) -> Option<String> {
         let mut item: *const c_void = std::ptr::null();
         // SAFETY: `self.0` is the live handle of this call and `item` a valid out-pointer.
-        let status = unsafe { pam_get_item(self.0, PAM_RHOST, &mut item) };
+        let status = unsafe { pam_get_item(self.0, item_type, &mut item) };
         if status != PAM_SUCCESS {
             return None;
         }
-        // SAFETY: the PAM_RHOST item is NULL or a C string owned by libpam, unchanged during
-        // this call.
+        // SAFETY: the PAM_USER and PAM_RHOST items are NULL or C strings owned by libpam,
+        // unchanged during this call.
         unsafe { copy_bounded(item.cast(), max) }
     }
 

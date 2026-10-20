@@ -390,7 +390,12 @@ mod tests {
             f.login_at(Some("nobody"), &code, NOW),
             Outcome::failure("no such local user")
         );
-        assert!(!f.login_at(None, &code, NOW).success);
+        // No user set by the application: the code is still asked for (once, checked by
+        // login_at), and refused without looking up anyone.
+        assert_eq!(
+            f.login_at(None, &code, NOW),
+            Outcome::failure("no valid user name")
+        );
         assert!(!f.login_at(Some(""), &code, NOW).success);
         assert!(
             !f.login_at(Some(&"m".repeat(MAX_NAME + 1)), &code, NOW)
