@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+# cargo deny (CI): licences, advisories and sources of the locked dependencies.
+
+[advisories]
+# Known vulnerabilities fail the build (the default); so do unmaintained and yanked crates.
+unmaintained = "all"
+yanked = "deny"
+
+[licenses]
+# Permissive licences only, so pam-totp stays cleanly MIT.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
