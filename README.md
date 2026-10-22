@@ -83,6 +83,11 @@ are ignored by default and CI runs them as root in a throwaway Debian 13 contain
 PAM_NYRA_TOTP=/path/to/libpam_nyra_totp.so <test binary> --ignored --test-threads=1
 ```
 
+One of them, `no_memory_is_leaked`, runs thousands of logins of every kind (right, wrong, empty,
+too long or missing answers, a failing conversation, missing or unusable user names, broken state
+files) and fails if the resident memory of the process grows. The `leaks` job runs the same loop
+under valgrind, which must report no definite or indirect loss.
+
 ### Fuzzing
 
 `fuzz/` holds the [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets, in a workspace of

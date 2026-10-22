@@ -6,6 +6,12 @@
 //! ```text
 //! PAM_NYRA_TOTP=/path/to/libpam_nyra_totp.so <this test binary> --ignored --test-threads=1
 //! ```
+//!
+//! `no_memory_is_leaked` is the loop that checks the module's `unsafe` code for leaks: it runs
+//! many logins of every kind in this process and fails if the resident memory grows. The `leaks`
+//! job in CI also runs it under valgrind, with `PAM_NYRA_NO_RSS_CHECK=1` (valgrind's allocator
+//! keeps freed blocks, so the resident size means nothing there) and a smaller
+//! `PAM_NYRA_LEAK_ITERATIONS`.
 
 use pam_totp::state::{STATE_DIR, State, Store};
 use pam_totp::totp::{self, Algorithm, PERIOD};
@@ -343,15 +349,31 @@ fn one_code_for_one_of_many_concurrent_logins() {
     assert_eq!(drain_log().len(), 8);
 }
 
-/// A minimal PAM application, for what pamtester cannot do: start a transaction with no user set.
-/// It records every message of the conversation and answers each prompt with `ANSWER`.
+/// A minimal PAM application, for what pamtester cannot do: start a transaction with no user set,
+/// or answer the prompt in a chosen way. It records every message of the conversation.
 mod app {
-    use std::ffi::{CStr, c_char, c_int, c_void};
+    use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
     pub const ANSWER: &CStr = c"123456";
     const PAM_SUCCESS: c_int = 0;
     const PAM_BUF_ERR: c_int = 5;
     const PAM_CONV_ERR: c_int = 19;
+    const PAM_RHOST: c_int = 4;
+
+    /// What the conversation function does with each prompt.
+    pub enum Reply {
+        /// Answers with this text, in memory from the C allocator, as libpam expects.
+        Text(CString),
+        /// Succeeds without any text: the response is NULL.
+        NoText,
+        /// Fails, as an application does when the user closed the terminal.
+        Fail,
+    }
+
+    struct Script {
+        seen: Vec<(c_int, String)>,
+        reply: Reply,
+    }
 
     #[repr(C)]
     struct Message {
@@ -379,6 +401,7 @@ mod app {
             conv: *const Conv,
             pamh: *mut *mut c_void,
         ) -> c_int;
+        fn pam_set_item(pamh: *mut c_void, item_type: c_int, item: *const c_void) -> c_int;
         fn pam_authenticate(pamh: *mut c_void, flags: c_int) -> c_int;
         fn pam_end(pamh: *mut c_void, status: c_int) -> c_int;
     }
@@ -388,7 +411,8 @@ mod app {
         fn strdup(s: *const c_char) -> *mut c_char;
     }
 
-    /// Records (style, text) of each message in the `Vec` behind `appdata` and answers them all.
+    /// Records (style, text) of each message in the `Script` behind `appdata` and answers them as
+    /// it says.
     extern "C" fn conversation(
         num: c_int,
         messages: *mut *const Message,
@@ -400,10 +424,13 @@ mod app {
         };
         // SAFETY: libpam passes `num` valid messages (Linux-PAM layout: an array of pointers),
         // a valid out-pointer for the responses, and the `appdata` given to pam_start below,
-        // which points to a live `Vec`. The responses are allocated with the C allocator, as
+        // which points to a live `Script`. The responses are allocated with the C allocator, as
         // libpam frees them.
         unsafe {
-            let seen = &mut *appdata.cast::<Vec<(c_int, String)>>();
+            let script = &mut *appdata.cast::<Script>();
+            if matches!(script.reply, Reply::Fail) {
+                return PAM_CONV_ERR;
+            }
             let out = calloc(num, std::mem::size_of::<Response>()).cast::<Response>();
             if out.is_null() {
                 return PAM_BUF_ERR;
@@ -411,34 +438,55 @@ mod app {
             for i in 0..num {
                 let message = &**messages.add(i);
                 let text = CStr::from_ptr(message.msg).to_string_lossy().into_owned();
-                seen.push((message.style, text));
-                (*out.add(i)).resp = strdup(ANSWER.as_ptr());
+                script.seen.push((message.style, text));
+                if let Reply::Text(answer) = &script.reply {
+                    (*out.add(i)).resp = strdup(answer.as_ptr());
+                }
             }
             *responses = out;
         }
         PAM_SUCCESS
     }
 
-    /// Runs pam_authenticate on `service` with no user set. Returns its status and the
-    /// conversation's messages.
-    pub fn authenticate_without_user(service: &CStr) -> (c_int, Vec<(c_int, String)>) {
-        let mut seen: Vec<(c_int, String)> = Vec::new();
+    /// Runs pam_authenticate on `service` for `user` (none: no user set) coming from `rhost`
+    /// (none: not set). Returns its status and the conversation's messages.
+    pub fn authenticate(
+        service: &CStr,
+        user: Option<&CStr>,
+        rhost: Option<&CStr>,
+        reply: Reply,
+    ) -> (c_int, Vec<(c_int, String)>) {
+        let mut script = Script {
+            seen: Vec::new(),
+            reply,
+        };
         let conv = Conv {
             conv: conversation,
-            appdata: (&raw mut seen).cast(),
+            appdata: (&raw mut script).cast(),
         };
         let mut pamh = std::ptr::null_mut();
         // SAFETY: valid C strings and pointers that outlive the transaction, which ends here.
         let status = unsafe {
             assert_eq!(
-                pam_start(service.as_ptr(), std::ptr::null(), &conv, &mut pamh),
+                pam_start(
+                    service.as_ptr(),
+                    user.map_or(std::ptr::null(), CStr::as_ptr),
+                    &conv,
+                    &mut pamh
+                ),
                 PAM_SUCCESS
             );
+            if let Some(rhost) = rhost {
+                assert_eq!(
+                    pam_set_item(pamh, PAM_RHOST, rhost.as_ptr().cast()),
+                    PAM_SUCCESS
+                );
+            }
             let status = pam_authenticate(pamh, 0);
             pam_end(pamh, status);
             status
         };
-        (status, seen)
+        (status, script.seen)
     }
 }
 
@@ -448,7 +496,8 @@ fn no_user_set_gets_only_the_code_prompt() {
     setup();
     drain_log();
     let service = std::ffi::CString::new(SERVICE).unwrap();
-    let (status, seen) = app::authenticate_without_user(&service);
+    let (status, seen) =
+        app::authenticate(&service, None, None, app::Reply::Text(app::ANSWER.into()));
     const PAM_AUTH_ERR: i32 = 7;
     const PAM_PROMPT_ECHO_OFF: i32 = 1;
     assert_eq!(status, PAM_AUTH_ERR);
@@ -465,4 +514,107 @@ fn no_user_set_gets_only_the_code_prompt() {
     );
     let answer = app::ANSWER.to_str().unwrap();
     assert!(!log[0].contains(answer), "{log:?}");
+}
+
+/// The resident memory of this process, in KiB.
+fn rss_kib() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
+    line.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// Many logins of every kind through the real libpam and the module, in this process: the answer
+/// the module receives from `pam_prompt` (right, wrong, empty, far too long, none, the
+/// conversation failing), a missing, unknown or too long user name, a missing or invalid remote
+/// host, a user with no state file or a broken one, and a module option. Every attempt must give
+/// the expected result and one log line of the module, and the resident memory of the process
+/// must stay flat after a warm-up: a response that is not freed, or any other leak in the
+/// module, grows it.
+#[test]
+#[ignore = "needs root, pamtester and the built module"]
+fn no_memory_is_leaked() {
+    use app::Reply;
+    use std::ffi::CString;
+
+    // Valgrind (the `leaks` CI job) checks the leaks itself; its resident size means nothing.
+    let check_rss = std::env::var_os("PAM_NYRA_NO_RSS_CHECK").is_none();
+    let iterations: usize =
+        std::env::var("PAM_NYRA_LEAK_ITERATIONS").map_or(20_000, |n| n.parse().unwrap());
+    let warm_up = iterations / 10;
+    // Above the noise of the allocator (0 to 64 KiB between runs). A leaked 10,000-byte answer
+    // grows the process by about 12,000 KiB in a run; a leak of a few bytes per login is too
+    // small for this check, and valgrind (the `leaks` job) is what catches it.
+    const MAX_GROWTH_KIB: u64 = 256;
+
+    for (name, uid) in [("leak", 2020), ("leaknostate", 2021), ("leakbroken", 2022)] {
+        add_user(name, uid);
+    }
+    enable(2020);
+    enable(2022);
+    std::fs::write(state_file(2022), "version=1\nsecret=???\n").unwrap();
+
+    let service = CString::new(SERVICE).unwrap();
+    let with_option = CString::new(SERVICE_WITH_OPTION).unwrap();
+    let rhost = CString::new(RHOST).unwrap();
+    let text = |s: &str| Reply::Text(CString::new(s).unwrap());
+    let long_name = CString::new("u".repeat(300)).unwrap();
+    let not_utf8 = CString::new(vec![0xff, 0xfe]).unwrap();
+    let (rhost, long_name, not_utf8) =
+        (rhost.as_c_str(), long_name.as_c_str(), not_utf8.as_c_str());
+    let (leak, nostate, broken, ghost) = (c"leak", c"leaknostate", c"leakbroken", c"ghost");
+    let mut start_rss = 0;
+    for i in 0..iterations {
+        if i == warm_up {
+            start_rss = rss_kib();
+        }
+        let now = now();
+        let right = app(now);
+        // (service, user, remote host, what the application answers, whether the login is right)
+        let on = |user, host, reply, accepted| (service.as_c_str(), user, host, reply, accepted);
+        let (service, user, host, reply, accepted) = match i % 15 {
+            0 => on(Some(leak), Some(rhost), text(&right), true),
+            1 => on(Some(leak), Some(rhost), text(&wrong(now)), false),
+            2 => on(Some(leak), Some(rhost), text(""), false),
+            3 => on(Some(leak), Some(rhost), text(&"7".repeat(10_000)), false),
+            4 => on(Some(leak), Some(rhost), text("abcdef"), false),
+            5 => on(Some(leak), Some(rhost), Reply::NoText, false),
+            6 => on(Some(leak), Some(rhost), Reply::Fail, false),
+            7 => on(Some(leak), None, text(&right), true),
+            8 => on(Some(leak), Some(not_utf8), text(&right), true),
+            9 => on(None, Some(rhost), text(&right), false),
+            10 => on(Some(ghost), Some(rhost), text(&right), false),
+            11 => on(Some(nostate), Some(rhost), text(&right), false),
+            12 => on(Some(broken), Some(rhost), text(&right), false),
+            13 => on(Some(long_name), Some(rhost), text(&right), false),
+            _ => (
+                with_option.as_c_str(),
+                Some(leak),
+                Some(rhost),
+                text(&right),
+                false,
+            ),
+        };
+        if accepted {
+            // The code of one step is accepted once: start from a fresh state.
+            enable(2020);
+        }
+        drain_log();
+        let (status, _) = app::authenticate(service, user, host, reply);
+        assert_eq!(status == 0, accepted, "attempt {i}: status {status}");
+        // libpam may add a line of its own (a failed conversation); the module logs exactly one.
+        let log = drain_log();
+        let ours = log
+            .iter()
+            .filter(|line| line.contains(" for user "))
+            .count();
+        assert_eq!(ours, 1, "attempt {i}: {log:?}");
+    }
+    if check_rss {
+        let growth = rss_kib().saturating_sub(start_rss);
+        eprintln!(
+            "resident memory grew by {growth} KiB over {} logins",
+            iterations - warm_up
+        );
+        assert!(growth <= MAX_GROWTH_KIB, "leak: grew by {growth} KiB");
+    }
 }

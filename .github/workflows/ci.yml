@@ -89,6 +89,38 @@ jobs:
           mirror.gcr.io/library/debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
           sh -c 'dpkg -i /t/pamtester.deb > /dev/null && /t/pamtester-tests --ignored --test-threads=1'
 
+  # The module's `unsafe` code under valgrind: the loop of tests/pamtester.rs that runs many logins
+  # of every kind through the real libpam must free every byte. The container gets valgrind from
+  # Debian's signed archive, then loses its network before anything of ours runs. Fewer logins than
+  # the memory-growth check in the pamtester job, since valgrind is slow.
+  leaks:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the module and the tests
+        run: |
+          cargo build --locked --release -p pam_nyra_totp
+          bin=$(cargo test --locked --test pamtester --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .target.name == "pamtester") | .executable')
+          mkdir "$RUNNER_TEMP/t"
+          cp "$bin" "$RUNNER_TEMP/t/pamtester-tests"
+          cp target/release/libpam_nyra_totp.so "$RUNNER_TEMP/t/pam_nyra_totp.so"
+          chmod 755 "$RUNNER_TEMP/t" "$RUNNER_TEMP/t/pamtester-tests" "$RUNNER_TEMP/t/pam_nyra_totp.so"
+      # The same debian:trixie-slim as tests-root.
+      - name: Run the loop under valgrind as root in a container
+        run: |
+          image=mirror.gcr.io/library/debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+          docker run -d --name leaks -v "$RUNNER_TEMP/t:/t:ro" "$image" sleep infinity
+          docker exec leaks sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends valgrind > /dev/null'
+          docker network disconnect bridge leaks
+          docker exec -e PAM_NYRA_TOTP=/t/pam_nyra_totp.so -e PAM_NYRA_NO_RSS_CHECK=1 -e PAM_NYRA_LEAK_ITERATIONS=300 leaks \
+            valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect --error-exitcode=1 \
+            /t/pamtester-tests --ignored --test-threads=1 no_memory_is_leaked
+
   deny:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
