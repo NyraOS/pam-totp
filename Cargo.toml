@@ -19,11 +19,11 @@ description = "TOTP two-factor for SSH password logins on Nyra OS servers"
 # Exact versions: the code that runs as root in the login path is only changed by a reviewed bump.
 [dependencies]
 getrandom = "=0.4.3"
-hmac = "=0.12.1"
+hmac = "=0.13.0"
 qrcode = { version = "=0.14.1", default-features = false }
 rustix = { version = "=1.1.5", features = ["fs", "process", "system"] }
-sha1 = "=0.10.6"
-sha2 = "=0.10.9"
+sha1 = "=0.11.0"
+sha2 = "=0.11.0"
 subtle = "=2.6.1"
 
 # The PAM module catches every panic at its exported functions, which needs unwinding: never set

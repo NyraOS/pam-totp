@@ -8,7 +8,7 @@
 //! refused, the secret is 160 bits, secrets under 128 bits are refused, and no input can make it
 //! panic.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use subtle::ConstantTimeEq;
@@ -156,9 +156,12 @@ fn hotp(secret: &[u8], algorithm: Algorithm, counter: u64, digits: u32) -> Strin
     )
 }
 
-fn mac_bytes<M: Mac + hmac::digest::KeyInit>(key: &[u8], message: &[u8]) -> Vec<u8> {
-    // Generic only to share this body between the three hash functions.
-    let mut mac = <M as Mac>::new_from_slice(key).expect("HMAC takes keys of any length");
+fn mac_bytes<M: Mac + KeyInit>(key: &[u8], message: &[u8]) -> Vec<u8> {
+    // Generic only to share this body between the three hash functions. Since hmac 0.13,
+    // `new_from_slice` is a `KeyInit` method, no longer a `Mac` one; that is the whole change here.
+    // The MAC is not compared here (`verify` compares codes with `subtle`, in constant time) and
+    // was never zeroized, before or now: it only holds the key the caller owns.
+    let mut mac = <M as KeyInit>::new_from_slice(key).expect("HMAC takes keys of any length");
     mac.update(message);
     mac.finalize().into_bytes().to_vec()
 }
