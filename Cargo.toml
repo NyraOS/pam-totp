@@ -18,7 +18,7 @@ description = "TOTP two-factor for SSH password logins on Nyra OS servers"
 
 # Exact versions: the code that runs as root in the login path is only changed by a reviewed bump.
 [dependencies]
-getrandom = "=0.3.4"
+getrandom = "=0.4.3"
 hmac = "=0.12.1"
 qrcode = { version = "=0.14.1", default-features = false }
 rustix = { version = "=1.1.5", features = ["fs", "process", "system"] }
