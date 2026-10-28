@@ -17,13 +17,13 @@ TOTP two-factor authentication for SSH password logins on Nyra OS servers: a PAM
 
 ## Build, test, lint
 
-Rust 1.85 or newer. Run what CI runs (`.github/workflows/ci.yml`):
+Rust 1.87 or newer. Run what CI runs (`.github/workflows/ci.yml`):
 
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-cargo +1.85 test --locked      # the oldest supported Rust
+cargo +1.87 test --locked      # the oldest supported Rust
 cargo deny --locked check      # needs cargo-deny
 ```
 

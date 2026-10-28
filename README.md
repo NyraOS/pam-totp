@@ -72,7 +72,8 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-The minimum supported Rust is 1.85, the one in Debian 13.
+The minimum supported Rust is 1.87: Debian 13's own rustc (1.85) is too old, so build with the Rust
+from trixie-backports (built and signed by Debian) or from a newer Debian.
 
 The tests in `tests/pamtester.rs` load the built module into the real libpam through
 `pamtester`. They change `/etc/passwd`, `/etc/pam.d`, `/var/lib/nyra/2fa` and `/dev/log`, so they

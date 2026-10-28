@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Format, lints and tests (on stable Rust and on 1.85, the oldest we support: Debian 13's),
+# Format, lints and tests (on stable Rust and on 1.87, the oldest we support),
 # licences and advisories of the locked dependencies, and a scan for secrets.
 # Every push to any branch runs it once; pull_request runs only for pull requests from forks, whose
 # pushes do not run here. Weekly as well, so new advisories show up without a code change.
@@ -24,8 +24,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - run: rustup toolchain install 1.85 --profile minimal
-      - run: cargo +1.85 test --locked
+      - run: rustup toolchain install 1.87 --profile minimal
+      - run: cargo +1.87 test --locked
 
   # The state and command tests again as root, which is who owns the state files in production (and
   # lets the test that hands a file to another user run). Root in a container with the default
