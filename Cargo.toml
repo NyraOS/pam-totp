@@ -10,8 +10,10 @@ exclude = ["fuzz"]
 name = "pam-totp"
 version = "0.1.0"
 edition = "2024"
-# The Rust in Debian 13 (trixie).
-rust-version = "1.85"
+# The oldest Rust we support: 1.87, the lowest that has the fixed ctutils (RUSTSEC-2026-0385, pulled
+# in by digest 0.11). Debian 13's own rustc is 1.85, so builds use the Rust of trixie-backports
+# (built and signed by Debian) or of a newer Debian.
+rust-version = "1.87"
 license = "MIT"
 repository = "https://github.com/NyraOS/pam-totp"
 description = "TOTP two-factor for SSH password logins on Nyra OS servers"
