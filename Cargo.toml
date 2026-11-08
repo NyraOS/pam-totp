@@ -23,7 +23,7 @@ description = "TOTP two-factor for SSH password logins on Nyra OS servers"
 getrandom = "=0.4.3"
 hmac = "=0.13.0"
 qrcode = { version = "=0.14.1", default-features = false }
-rustix = { version = "=1.1.5", features = ["fs", "process", "system"] }
+rustix = { version = "=1.1.6", features = ["fs", "process", "system"] }
 sha1 = "=0.11.0"
 sha2 = "=0.11.0"
 subtle = "=2.6.1"
